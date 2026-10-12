@@ -1,0 +1,106 @@
+{
+  "info": {
+    "name": "Spotter Fuel Route Planner",
+    "description": "Demo requests for GET /api/route/. Set the base_url variable if the server is not on http://127.0.0.1:8000.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" }
+  ],
+  "item": [
+    {
+      "name": "1. Health check",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{base_url}}/api/health/", "host": ["{{base_url}}"], "path": ["api", "health", ""] }
+      }
+    },
+    {
+      "name": "2. New York -> Los Angeles (full_tank)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=New York, NY&finish=Los Angeles, CA&strategy=full_tank",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "New York, NY" },
+            { "key": "finish", "value": "Los Angeles, CA" },
+            { "key": "strategy", "value": "full_tank" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "3. New York -> Los Angeles (exact_gallon, 30 min stops)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=New York, NY&finish=Los Angeles, CA&strategy=exact_gallon&stop_minutes=30",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "New York, NY" },
+            { "key": "finish", "value": "Los Angeles, CA" },
+            { "key": "strategy", "value": "exact_gallon" },
+            { "key": "stop_minutes", "value": "30" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "4. Short trip, no stop needed (Austin -> Dallas)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=Austin, TX&finish=Dallas, TX",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "Austin, TX" },
+            { "key": "finish", "value": "Dallas, TX" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "5. Coordinates input (Chicago -> Miami)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=41.8781,-87.6298&finish=Miami, FL",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "41.8781,-87.6298" },
+            { "key": "finish", "value": "Miami, FL" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "6. Error: no stations on a segment (Seattle -> Anchorage)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=Seattle, WA&finish=Anchorage, AK",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "Seattle, WA" },
+            { "key": "finish", "value": "Anchorage, AK" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "7. Error: validation (missing finish, bad strategy)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/route/?start=Austin, TX&strategy=cheapest",
+          "host": ["{{base_url}}"], "path": ["api", "route", ""],
+          "query": [
+            { "key": "start", "value": "Austin, TX" },
+            { "key": "strategy", "value": "cheapest" }
+          ]
+        }
+      }
+    }
+  ]
+}

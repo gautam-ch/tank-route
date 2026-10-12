@@ -1,0 +1,74 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fuel Route Planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="{% static 'router_app/css/style.css' %}">
+</head>
+<body>
+  <aside class="sidebar">
+    <header class="brand">
+      <h1>Fuel Route Planner</h1>
+      <p>Cheapest diesel stops along any US route · 500 mi range · 10 MPG</p>
+    </header>
+
+    <form id="route-form" class="card form" autocomplete="off">
+      <label>Start
+        <input name="start" required placeholder="e.g. New York, NY" value="New York, NY">
+      </label>
+      <label>Finish
+        <input name="finish" required placeholder="e.g. Los Angeles, CA" value="Los Angeles, CA">
+      </label>
+      <div class="row">
+        <label>Strategy
+          <select name="strategy">
+            <option value="full_tank">Full tank (fewest stops)</option>
+            <option value="exact_gallon">Exact gallon (lowest cost)</option>
+          </select>
+        </label>
+        <label>Stop minutes
+          <input name="stop_minutes" type="number" min="0" max="{{ max_stop_minutes }}"
+                 value="{{ default_stop_minutes }}">
+        </label>
+      </div>
+      <button type="submit" id="submit-btn">Plan route</button>
+    </form>
+
+    <div id="error" class="card error" hidden></div>
+
+    <section id="results" hidden>
+      <div class="stats">
+        <div class="stat accent"><span>Fuel spent at stops</span><strong id="s-cost"></strong></div>
+        <div class="stat"><span>Fuel burned (incl. start tank)</span><strong id="s-consumed"></strong></div>
+        <div class="stat"><span>Distance</span><strong id="s-distance"></strong></div>
+        <div class="stat"><span>Fuel stops</span><strong id="s-stops"></strong></div>
+        <div class="stat"><span>Driving time</span><strong id="s-driving"></strong></div>
+        <div class="stat"><span>Halting time</span><strong id="s-halting"></strong></div>
+        <div class="stat wide"><span>Total trip time</span><strong id="s-total"></strong></div>
+      </div>
+
+      <div class="card compare">
+        <h2>Strategy comparison</h2>
+        <table id="compare-table"></table>
+      </div>
+
+      <div class="card">
+        <h2>Fuel stops</h2>
+        <ol id="stops" class="stops"></ol>
+      </div>
+
+      <p id="perf" class="perf"></p>
+    </section>
+  </aside>
+
+  <main id="map" aria-label="Route map"></main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>window.ROUTE_API_URL = "{% url 'router_app:fuel_route' %}";</script>
+  <script src="{% static 'router_app/js/map.js' %}"></script>
+</body>
+</html>

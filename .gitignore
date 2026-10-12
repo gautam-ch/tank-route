@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Django
+db.sqlite3
+staticfiles/
+
+# Runtime caches / large downloads (rebuilt automatically)
+data/cache/
+data/gazetteer/
+
+# Personal research notes (not part of the submission)
+source_material/
+
+# Editors / OS
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
