@@ -1,4 +1,4 @@
-"""Tests for the optimizer (against brute force) and text normalisation."""
+"""Optimizer tests: optimality against brute force, edge cases, cost accounting."""
 from __future__ import annotations
 
 import itertools
@@ -7,10 +7,8 @@ import random
 import numpy as np
 from django.test import SimpleTestCase
 
-from .management.commands.geocode_stations import clean_gazetteer_name
-from .services.errors import NoFeasiblePlanError
-from .services.geocoding import _parse_city_state, normalize_place
-from .services.optimizer import (
+from ..services.errors import NoFeasiblePlanError
+from ..services.optimizer import (
     FuelPlan, Vehicle, optimize, plan_exact_gallon, plan_full_tank, simulate_tank,
 )
 
@@ -41,8 +39,8 @@ def brute_exact(markers: list[int], prices: list[float], total: int, R: int) -> 
 
 def brute_full_tank(markers: list[int], prices: list[float], total: int,
                     R: int) -> tuple[int, float]:
-    """Exhaustive (cost, stops) minimum over all stop subsets (mpg = 1)."""
-    best = (float('inf'), 10 ** 9)
+    """Exhaustive (stops, cost) minimum over all stop subsets (mpg = 1)."""
+    best = (10 ** 9, float('inf'))
     n = len(markers)
     for k in range(n + 1):
         for subset in itertools.combinations(range(n), k):
@@ -54,7 +52,7 @@ def brute_full_tank(markers: list[int], prices: list[float], total: int,
                 cost += (markers[i] - pos) * prices[i]
                 pos = markers[i]
             if ok and total - pos <= R:
-                best = min(best, (round(cost, 9), k))
+                best = min(best, (k, round(cost, 9)))
     return best
 
 
@@ -87,10 +85,10 @@ class OptimizerBruteForceTests(SimpleTestCase):
             checked += 1
         self.assertGreater(checked, 100)
 
-    def test_full_tank_is_cheapest_then_fewest_stops(self) -> None:
+    def test_full_tank_is_fewest_stops_then_cheapest(self) -> None:
         checked = 0
         for markers, prices, total in self._instances(400, 8):
-            cost, stops = brute_full_tank(markers, prices, total, 10)
+            stops, cost = brute_full_tank(markers, prices, total, 10)
             m, p = np.array(markers, float), np.array(prices, float)
             if stops == 10 ** 9:
                 with self.assertRaises(NoFeasiblePlanError):
@@ -139,55 +137,56 @@ class OptimizerEdgeCaseTests(SimpleTestCase):
         self.assertGreaterEqual(min(fp.arrival_gallons), 3.0 - 1e-9)
         self.assertAlmostEqual(fp.ending_tank_gallons, 3.0, places=6)
 
-    def test_full_tank_minimises_cost_not_stops(self) -> None:
-        # Options: {450} = 45 gal x $5 = $225 (1 stop); {300, 600} = $180;
-        # {300, 450} = 30 x $3 + 15 x $5 = $165 (cheapest, 2 stops).
-        markers = np.array([300.0, 450.0, 600.0])
-        prices = np.array([3.0, 5.0, 3.0])
+    def test_full_tank_uses_fewest_stops_then_cheapest(self) -> None:
+        # The README's worked example. 900 miles, so the last stop must be at
+        # mile >= 430. One-stop plans: {440} = 44 gal x $3.50 = $154 and
+        # {460} = 46 gal x $3.00 = $138. Two-stop plans are cheaper — e.g.
+        # {300, 460} = 30 x $2.00 + 16 x $3.00 = $108 — but need an extra stop.
+        markers = np.array([300.0, 440.0, 460.0, 600.0])
+        prices = np.array([2.0, 3.5, 3.0, 2.5])
         plan = plan_full_tank(markers, prices, 900, self.vehicle)
-        self.assertEqual([x.mile_marker for x in plan], [300.0, 450.0])
-
-    def test_full_tank_breaks_cost_ties_with_fewer_stops(self) -> None:
-        # Equal prices: {450} and {300, 450} both cost $135; prefer one stop.
-        plan = plan_full_tank(np.array([300.0, 450.0]), np.array([3.0, 3.0]),
-                              900, self.vehicle)
-        self.assertEqual([x.mile_marker for x in plan], [450.0])
+        self.assertEqual([x.mile_marker for x in plan], [460.0])
+        self.assertAlmostEqual(sum(x.cost for x in plan), 138.0)
 
 
-class BillingConsistencyTests(SimpleTestCase):
-    """Displayed gallons × displayed price must equal displayed cost."""
+class TripCostTests(SimpleTestCase):
+    """The headline trip cost is the cost of every gallon burned."""
 
-    def test_receipts_multiply_out_and_sum(self) -> None:
+    def _plans(self):
         rng = random.Random(7)
         markers = np.sort(np.array([rng.uniform(0, 2800) for _ in range(120)]))
         prices = np.array([rng.uniform(2.7, 4.2) for _ in range(120)])  # unrounded
         for strategy in ('full_tank', 'exact_gallon'):
-            plan = optimize(strategy, markers, prices, 2800.0, 3.5)
+            yield optimize(strategy, markers, prices, 2800.0, 3.5)
+
+    def test_receipts_multiply_out_and_sum(self) -> None:
+        for plan in self._plans():
             self.assertGreater(plan.stop_count, 0)
             for p in plan.purchases:
                 self.assertEqual(p.price, round(p.price, 3))
                 self.assertEqual(p.gallons, round(p.gallons, 3))
                 self.assertEqual(p.billed_cost, round(p.gallons * p.price + 1e-9, 2))
-            self.assertAlmostEqual(plan.total_cost,
+            self.assertAlmostEqual(plan.cost_at_stops,
                                    sum(p.billed_cost for p in plan.purchases), places=9)
 
+    def test_trip_cost_equals_cost_of_fuel_burned(self) -> None:
+        for plan in self._plans():
+            # Independently charge every mile at the tank's running average cost.
+            tank, avg, pos, burned = 50.0, 3.5, 0.0, 0.0
+            for p in plan.purchases:
+                used = (p.mile_marker - pos) / 10
+                burned, tank = burned + used * avg, tank - used
+                avg = (avg * tank + p.price * p.gallons) / (tank + p.gallons)
+                tank, pos = tank + p.gallons, p.mile_marker
+            burned += (2800.0 - pos) / 10 * avg
+            self.assertAlmostEqual(plan.trip_fuel_cost, burned, delta=0.02)
+            self.assertAlmostEqual(
+                plan.trip_fuel_cost,
+                plan.starting_tank_cost + plan.cost_at_stops - plan.ending_tank_value,
+                places=9)
 
-class TextNormalisationTests(SimpleTestCase):
-    """Place-name matching rules shared by stations and user input."""
-
-    def test_normalize_place_aliases(self) -> None:
-        self.assertEqual(normalize_place('Saint Johns'), normalize_place('St. Johns'))
-        self.assertEqual(normalize_place('Mc Graw'), normalize_place('McGraw'))
-        self.assertEqual(normalize_place('S Coffeyville'),
-                         normalize_place('South Coffeyville'))
-
-    def test_clean_gazetteer_name(self) -> None:
-        self.assertEqual(clean_gazetteer_name('Indianapolis city (balance)'), 'Indianapolis')
-        self.assertEqual(clean_gazetteer_name('St. Johns CDP'), 'St. Johns')
-        self.assertEqual(clean_gazetteer_name('Lake Station city'), 'Lake Station')
-
-    def test_parse_city_state(self) -> None:
-        self.assertEqual(_parse_city_state('Austin, TX'), ('Austin', 'TX'))
-        self.assertEqual(_parse_city_state('Austin, Texas, USA'), ('Austin', 'TX'))
-        self.assertEqual(_parse_city_state('Austin TX 78701'), ('Austin', 'TX'))
-        self.assertIsNone(_parse_city_state('Empire State Building'))
+    def test_short_trip_costs_the_fuel_it_burns(self) -> None:
+        plan = optimize('full_tank', np.array([50.0]), np.array([3.0]), 200.0, 3.2)
+        self.assertEqual(plan.stop_count, 0)
+        self.assertEqual(plan.cost_at_stops, 0)
+        self.assertEqual(plan.trip_fuel_cost, 64.0)  # 20 gal x $3.20

@@ -6,31 +6,36 @@ Django 6.1 — Spotter Fuel Route Planner API
 from pathlib import Path
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ---------------------------------------------------------------------------
-# Security
-# ---------------------------------------------------------------------------
-# NOTE: Replace this with a proper secret in production (use env variable).
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-dev-secret-spotter-fuel-route-planner-change-in-prod'
-)
 
-DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
+def env_list(name: str, default: str) -> list[str]:
+    """Comma-separated environment variable → list of non-empty strings."""
+    return [item.strip() for item in os.environ.get(name, default).split(',') if item.strip()]
 
-ALLOWED_HOSTS = ['*']  # Restrict in production
 
 # ---------------------------------------------------------------------------
-# Application definition
+# Security — local development works with no configuration; production must
+# set DJANGO_DEBUG=False, DJANGO_SECRET_KEY and DJANGO_ALLOWED_HOSTS.
+# ---------------------------------------------------------------------------
+DEBUG = os.environ.get('DJANGO_DEBUG', 'True').lower() in ('1', 'true', 'yes')
+
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise ImproperlyConfigured('DJANGO_SECRET_KEY must be set when DEBUG is off.')
+    SECRET_KEY = 'insecure-dev-only-key'
+
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,[::1]')
+
+# ---------------------------------------------------------------------------
+# Application definition — a stateless JSON API: no database, admin, auth or
+# sessions are needed.
 # ---------------------------------------------------------------------------
 INSTALLED_APPS = [
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
     'django.contrib.staticfiles',
     # Third-party
     'rest_framework',
@@ -42,11 +47,8 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  # Must be first
     'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
@@ -61,8 +63,6 @@ TEMPLATES = [
             'context_processors': [
                 'django.template.context_processors.debug',
                 'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
             ],
         },
     },
@@ -71,14 +71,9 @@ TEMPLATES = [
 WSGI_APPLICATION = 'spotter_project.wsgi.application'
 
 # ---------------------------------------------------------------------------
-# Database
+# Database — none. Station data lives in memory (loaded once at startup).
 # ---------------------------------------------------------------------------
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+DATABASES = {}
 
 # ---------------------------------------------------------------------------
 # Caching — Local memory cache (dev). Replace with Redis in production.
@@ -105,16 +100,6 @@ CACHES = {
         },
     },
 }
-
-# ---------------------------------------------------------------------------
-# Password validation (kept minimal for API-only project)
-# ---------------------------------------------------------------------------
-AUTH_PASSWORD_VALIDATORS = [
-    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
-    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
-]
 
 # ---------------------------------------------------------------------------
 # Internationalization
@@ -146,18 +131,25 @@ REST_FRAMEWORK = {
     'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
     ],
+    # Public, read-only API: no users, so no authentication machinery.
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
+    'DEFAULT_PERMISSION_CLASSES': ['rest_framework.permissions.AllowAny'],
+    'UNAUTHENTICATED_USER': None,
+    # Per-IP limit, mainly to protect the free OSRM/Nominatim servers. Generous
+    # enough for Postman runners and quick load tests; cached routes are cheap.
     'DEFAULT_THROTTLE_CLASSES': [
         'rest_framework.throttling.AnonRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '60/minute',
+        'anon': os.environ.get('API_THROTTLE_RATE', '1000/minute'),
     },
 }
 
 # ---------------------------------------------------------------------------
-# CORS — Allow all origins in development
+# CORS — any origin while developing; an explicit list otherwise.
 # ---------------------------------------------------------------------------
-CORS_ALLOW_ALL_ORIGINS = True  # Restrict in production
+CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', '')
 
 # ---------------------------------------------------------------------------
 # Fuel Route Planner — Application Constants
@@ -214,9 +206,8 @@ ROUTE_GEOMETRY_SIMPLIFY_TOLERANCE_DEG = 0.005
 # Geocoding
 GEOCODING_TIMEOUT_SECONDS = 5
 GEOCODE_CACHE_SECONDS = 30 * 86400
-NOMINATIM_USER_AGENT = os.environ.get(
-    'NOMINATIM_USER_AGENT', 'spotter-fuel-route-planner/1.0'
-)
+# Identifies us to OSRM and Nominatim (their usage policies require one).
+HTTP_USER_AGENT = os.environ.get('HTTP_USER_AGENT', 'spotter-fuel-route-planner/1.0')
 NOMINATIM_MIN_DELAY_SECONDS = 1.1  # Nominatim policy: max 1 request/second
 
 # Offline US place gazetteer (US Census Bureau, public domain). Downloaded once
@@ -225,6 +216,11 @@ GAZETTEER_BASE_URL = 'https://www2.census.gov/geo/docs/maps-data/data/gazetteer'
 GAZETTEER_YEAR = 2024
 GAZETTEER_DIR = BASE_DIR / 'data' / 'gazetteer'
 US_PLACES_JSON = BASE_DIR / 'data' / 'us_places.json'
+# US national boundary (Census cartographic boundary, 1:5M), used to reject
+# start/finish locations outside the USA.
+US_BOUNDARY_URL = ('https://www2.census.gov/geo/tiger/GENZ2024/kml/'
+                   'cb_2024_us_nation_5m.zip')
+US_BOUNDARY_JSON = BASE_DIR / 'data' / 'us_boundary.json'
 # Persisted Nominatim answers for station cities the gazetteer misses,
 # so re-running the geocode command never re-queries the network.
 GEOCODE_FALLBACK_CACHE_JSON = BASE_DIR / 'data' / 'geocode_fallback_cache.json'

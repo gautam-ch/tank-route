@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from shapely.geometry import LineString
 
+from .services.boundary import get_us_boundary
 from .services.errors import RoutePlanningError
 from .services.geocoding import get_gazetteer, get_geocoder
 from .services.optimizer import FuelPlan, optimize
@@ -76,7 +77,7 @@ def _stops_payload(plan: FuelPlan, corridor: Corridor,
             'mile_marker': _r(purchase.mile_marker, 1),
             'off_route_miles': _r(corridor.off_route_miles[purchase.node], 1),
             'price_per_gallon': _r(purchase.price, 3),
-            'gallons_in_tank_on_arrival': _r(arrival, 1),
+            'gallons_in_tank_on_arrival': _r(arrival, 3),
             'gallons_purchased': _r(purchase.gallons, 3),
             'cost_at_stop': purchase.billed_cost,
         })
@@ -85,8 +86,8 @@ def _stops_payload(plan: FuelPlan, corridor: Corridor,
 
 def _plan_summary(plan: FuelPlan) -> dict[str, Any]:
     return {
-        'total_fuel_cost_usd': _r(plan.total_cost),
-        'fuel_consumed_cost_usd': _r(plan.consumed_cost),
+        'total_fuel_cost_usd': plan.trip_fuel_cost,
+        'cost_at_stops_usd': plan.cost_at_stops,
         'fuel_stop_count': plan.stop_count,
     }
 
@@ -177,25 +178,32 @@ class FuelRouteView(APIView):
                 'served_from_cache': route.from_cache,
             },
             'fuel_plan': {
-                'total_fuel_cost_usd': _r(plan.total_cost),
-                'total_gallons_purchased': _r(plan.total_gallons, 3),
-                'average_price_paid': (_r(plan.total_cost / plan.total_gallons, 3)
-                                       if plan.total_gallons else None),
+                'total_fuel_cost_usd': plan.trip_fuel_cost,
+                'total_gallons': _r(plan.gallons_burned, 2),
                 'fuel_stop_count': plan.stop_count,
+                'cost_at_stops_usd': plan.cost_at_stops,
+                'gallons_purchased_at_stops': _r(plan.gallons_at_stops, 3),
+                'average_price_paid_at_stops': (
+                    _r(plan.cost_at_stops / plan.gallons_at_stops, 3)
+                    if plan.gallons_at_stops else None),
                 'stops': stops,
-                'fuel_consumed': {
-                    'note': ('Cost of all fuel burned on the trip. The starting '
-                             'full tank is valued at the nearest station to the '
-                             'start; purchases are blended at average cost.'),
-                    'gallons': _r(plan.consumed_gallons, 2),
-                    'cost_usd': _r(plan.consumed_cost),
+                'cost_breakdown': {
+                    'note': ('total_fuel_cost_usd = starting_tank_cost_usd + '
+                             'cost_at_stops_usd - ending_tank_value_usd, i.e. the '
+                             'cost of the total_gallons burned. The vehicle leaves '
+                             'with a full tank priced at the station nearest the '
+                             'start; fuel left on arrival is valued at its '
+                             'average cost.'),
                     'starting_tank_gallons': plan.vehicle.tank_gallons,
-                    'starting_tank_price_per_gallon': _r(start_price, 3),
+                    'starting_tank_price_per_gallon': plan.starting_tank_price,
                     'starting_tank_price_source': (
                         f"{start_station['name']}, {start_station['city']}, "
                         f"{start_station['state']} ({start_station_miles:.0f} mi from start)"
                     ),
+                    'starting_tank_cost_usd': plan.starting_tank_cost,
+                    'cost_at_stops_usd': plan.cost_at_stops,
                     'ending_tank_gallons': _r(plan.ending_tank_gallons, 2),
+                    'ending_tank_value_usd': plan.ending_tank_value,
                 },
                 'vehicle': {
                     'tank_gallons': plan.vehicle.tank_gallons,
@@ -255,6 +263,7 @@ class HealthCheckView(APIView):
     def get(self, request: Request) -> Response:
         try:
             stations = len(get_station_index())
+            get_us_boundary()
         except RoutePlanningError as exc:
             return Response({'status': 'degraded', 'detail': exc.detail},
                             status=status.HTTP_503_SERVICE_UNAVAILABLE)

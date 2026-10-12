@@ -17,13 +17,17 @@ Pipeline:
    persisted so re-runs never repeat a network lookup.
 5. Collapse duplicate rows per OPIS station ID, keeping the MINIMUM price.
 6. Write ``data/stations_geocoded.json`` and print a summary.
+7. Build ``data/us_boundary.json`` from the Census national boundary (KML),
+   used at request time to reject locations outside the USA.
 """
 from __future__ import annotations
 
 import csv
 import io
 import json
+import re
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -34,10 +38,18 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from geopy.exc import GeopyError
 from geopy.geocoders import Nominatim
+from shapely.geometry import MultiPolygon, Polygon, mapping
+from shapely.ops import unary_union
 
 from router_app.services.geocoding import US_STATES, normalize_place
 
 GAZETTEER_KINDS = ('place', 'cousubs')
+KML = '{http://www.opengis.net/kml/2.2}'
+# ~0.5 km: simplify the boundary, then grow it by the same amount so that
+# waterfront coordinates still count as inside. Tested on border pairs
+# (Detroit/Windsor, San Ysidro/Tijuana, Calais/St. Stephen, Sault Ste. Marie).
+BOUNDARY_TOLERANCE_DEG = 0.005
+BOUNDARY_MIN_AREA_DEG2 = 1e-4  # drop specks (tiny islets) to keep the file small
 
 
 def clean_gazetteer_name(raw: str) -> str:
@@ -63,6 +75,10 @@ def clean_gazetteer_name(raw: str) -> str:
 def name_variants(clean_name: str) -> set[str]:
     """Return normalized lookup keys for a place, incl. hyphen/slash parts."""
     keys = {normalize_place(clean_name)}
+    # Census calls the city of Honolulu "Urban Honolulu CDP"; without this the
+    # key "honolulu" falls to a county subdivision centred 1,200 miles away.
+    if clean_name.startswith('Urban '):
+        keys.add(normalize_place(clean_name[len('Urban '):]))
     for sep in ('-', '/'):
         if sep in clean_name:
             keys.update(normalize_place(part) for part in clean_name.split(sep))
@@ -124,6 +140,7 @@ class Command(BaseCommand):
             f'failed {len(failed)})'
         )
         self.stdout.write(f'Unique stations written:  {len(stations)} -> {output}')
+        self._build_us_boundary()
         if failed:
             preview = ', '.join(f'{c}, {s}' for c, s in failed[:25])
             more = f' ... (+{len(failed) - 25} more)' if len(failed) > 25 else ''
@@ -182,11 +199,50 @@ class Command(BaseCommand):
         for (state, key), (_, lat, lon) in best.items():
             places[state][key] = [round(lat, 6), round(lon, 6)]
         with open(settings.US_PLACES_JSON, 'w', encoding='utf-8') as fh:
-            json.dump(places, fh, separators=(',', ':'))
+            # sort_keys: name_variants() returns a set, so keep re-runs byte-identical.
+            json.dump(places, fh, separators=(',', ':'), sort_keys=True)
         self.stdout.write(
             f'Gazetteer: {len(best)} place keys -> {settings.US_PLACES_JSON}'
         )
         return places
+
+    # ------------------------------------------------------------- boundary
+    def _build_us_boundary(self) -> None:
+        """Write the simplified US national boundary as GeoJSON."""
+        path = Path(settings.GAZETTEER_DIR) / Path(settings.US_BOUNDARY_URL).name
+        if not path.exists():
+            self.stdout.write(f'Downloading {settings.US_BOUNDARY_URL} ...')
+            try:
+                response = requests.get(settings.US_BOUNDARY_URL, timeout=60)
+                response.raise_for_status()
+            except requests.RequestException as exc:
+                raise CommandError(f'Boundary download failed: {exc}') from exc
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(response.content)
+        with zipfile.ZipFile(path) as archive:
+            member = next(n for n in archive.namelist() if n.endswith('.kml'))
+            root = ET.fromstring(archive.read(member))
+
+        def ring(element: ET.Element) -> list[tuple[float, float]]:
+            return [tuple(map(float, point.split(',')[:2]))
+                    for point in element.text.split()]
+
+        polygons = []
+        for polygon in root.iter(f'{KML}Polygon'):
+            outer = polygon.find(f'{KML}outerBoundaryIs/{KML}LinearRing/{KML}coordinates')
+            inner = polygon.findall(f'{KML}innerBoundaryIs/{KML}LinearRing/{KML}coordinates')
+            polygons.append(Polygon(ring(outer), [ring(r) for r in inner]))
+
+        geometry = (unary_union(polygons)
+                    .buffer(BOUNDARY_TOLERANCE_DEG)
+                    .simplify(BOUNDARY_TOLERANCE_DEG))
+        parts = geometry.geoms if geometry.geom_type == 'MultiPolygon' else [geometry]
+        geometry = MultiPolygon([p for p in parts if p.area > BOUNDARY_MIN_AREA_DEG2])
+        text = json.dumps(mapping(geometry), separators=(',', ':'))
+        text = re.sub(r'(\d+\.\d{4})\d+', r'\1', text)  # 4 decimals ≈ 10 m
+        Path(settings.US_BOUNDARY_JSON).write_text(text, encoding='utf-8')
+        self.stdout.write(f'US boundary: {len(geometry.geoms)} polygons, '
+                          f'{len(text) // 1024} KB -> {settings.US_BOUNDARY_JSON}')
 
     # ------------------------------------------------------------------ CSV
     @staticmethod
@@ -252,7 +308,7 @@ class Command(BaseCommand):
                 f'Querying Nominatim for {len(to_query)} pairs '
                 f'(~{len(to_query) * settings.NOMINATIM_MIN_DELAY_SECONDS:.0f}s) ...'
             )
-            geolocator = Nominatim(user_agent=settings.NOMINATIM_USER_AGENT,
+            geolocator = Nominatim(user_agent=settings.HTTP_USER_AGENT,
                                    timeout=settings.GEOCODING_TIMEOUT_SECONDS)
             for n, (city, state) in enumerate(to_query, 1):
                 fallback[f'{city}|{state}'] = self._nominatim_lookup(

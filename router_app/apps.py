@@ -31,10 +31,12 @@ class RouterAppConfig(AppConfig):
             logger.warning('%s not found - run `python manage.py geocode_stations`.',
                            settings.STATIONS_GEOCODED_JSON)
             return
+        from .services.boundary import get_us_boundary
         from .services.geocoding import get_gazetteer
         from .services.spatial import get_station_index
         try:
             get_station_index()
             get_gazetteer()
+            get_us_boundary()
         except Exception:  # never block startup; requests will report errors
             logger.exception('Failed to warm up station index.')

@@ -78,7 +78,7 @@
   function renderSidebar(data) {
     const plan = data.fuel_plan;
     $('s-cost').textContent = money(plan.total_fuel_cost_usd);
-    $('s-consumed').textContent = money(plan.fuel_consumed.cost_usd);
+    $('s-at-stops').textContent = money(plan.cost_at_stops_usd);
     $('s-distance').textContent = miles(data.route.distance_miles);
     $('s-stops').textContent = plan.fuel_stop_count;
     $('s-driving').textContent = hours(data.route.driving_duration_minutes);
@@ -90,10 +90,10 @@
       const label = name === 'full_tank' ? 'Full tank' : 'Exact gallon';
       if (c.error) return `<tr${active}><td>${label}</td><td colspan="3">${escapeHtml(c.error)}</td></tr>`;
       return `<tr${active}><td>${label}</td><td>${money(c.total_fuel_cost_usd)}</td>` +
-        `<td>${money(c.fuel_consumed_cost_usd)}</td><td>${c.fuel_stop_count}</td></tr>`;
+        `<td>${money(c.cost_at_stops_usd)}</td><td>${c.fuel_stop_count}</td></tr>`;
     }).join('');
     $('compare-table').innerHTML =
-      '<tr><th>Strategy</th><th>Spent</th><th>Burned</th><th>Stops</th></tr>' + rows;
+      '<tr><th>Strategy</th><th>Trip cost</th><th>At stops</th><th>Stops</th></tr>' + rows;
 
     const list = $('stops');
     list.innerHTML = '';

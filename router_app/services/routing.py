@@ -50,7 +50,12 @@ class Route:
     @property
     def made_network_call(self) -> bool:
         """True if this route was fetched from an external API."""
-        return not self.from_cache
+        return self.provider != 'none' and not self.from_cache
+
+    @classmethod
+    def stationary(cls, lat: float, lon: float) -> 'Route':
+        """Zero-length route for identical start and finish (no API call)."""
+        return cls(np.array([[lon, lat], [lon, lat]], dtype=float), 0.0, 0.0, 'none')
 
 
 def haversine_miles(lat1: np.ndarray, lon1: np.ndarray,
@@ -78,13 +83,20 @@ class RoutingClient:
 
     def __init__(self) -> None:
         self._session = requests.Session()
-        self._session.headers['User-Agent'] = settings.NOMINATIM_USER_AGENT
-        self._cache = caches['persistent']
+        self._session.headers['User-Agent'] = settings.HTTP_USER_AGENT
+
+    @property
+    def _cache(self):
+        # Looked up per use (not stored) so test cache overrides take effect.
+        return caches['persistent']
 
     def get_route(self, start: tuple[float, float],
                   finish: tuple[float, float]) -> Route:
         """Return the route between (lat, lon) ``start`` and ``finish``."""
-        key = 'route:v1:{:.4f},{:.4f};{:.4f},{:.4f}'.format(*start, *finish)
+        a, b = '{:.4f},{:.4f}'.format(*start), '{:.4f},{:.4f}'.format(*finish)
+        if a == b:  # same point (~10 m): nothing to route
+            return Route.stationary(*start)
+        key = f'route:v1:{a};{b}'
         cached = self._cache.get(key)
         if cached is not None:
             return Route(cached['coordinates'], cached['distance_miles'],

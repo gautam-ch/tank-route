@@ -9,14 +9,17 @@ The vehicle starts with a full tank.
 Strategies
 ----------
 full_tank
-    Every stop fills the tank completely (realistic truck-stop behaviour),
-    and the stops are chosen for the **lowest total cost**. Exact DP over
-    stations (vectorised window minimum, O(K·W)):
+    Every stop fills the tank completely (realistic truck-stop behaviour).
+    The plan uses the **fewest stops** possible and, among all plans with that
+    many stops, the **lowest cost**. Exact DP over stations (vectorised window
+    minimum, O(K·W)). ``dp[i]`` is the best (stops, cost) pair for a plan
+    whose latest stop is station ``i``, compared stops first, then cost.
+    Filling up at ``i`` after stopping at ``j`` buys exactly the fuel burned
+    since ``j``:
 
-    key[i] = min_{j : d_i - d_j <= R} key[j] + (d_i - d_j) / mpg * p_i + TIE
-
-    TIE is a negligible amount per stop, so among equally cheap plans the one
-    with fewer stops wins.
+    dp[0] = (0, $0)                             (start, tank full)
+    dp[i] = min_{j : d_i - d_j <= R} (stops_j + 1, cost_j + (d_i - d_j) / mpg * p_i)
+    answer = min_{i : total - d_i <= R} dp[i]
 
 exact_gallon
     Buy any amount at each stop. Minimum total cost, solved exactly by the
@@ -29,6 +32,15 @@ exact_gallon
 
     The destination is a node with price 0 so no fuel is bought that would
     still be in the tank on arrival.
+
+Trip cost
+---------
+The vehicle starts with a full tank bought at the origin. Fuel in the tank is
+valued at its weighted-average cost, so for every plan::
+
+    trip fuel cost = starting tank + purchases at stops - fuel left on arrival
+
+which is exactly the cost of the ``total_miles / mpg`` gallons burned.
 """
 from __future__ import annotations
 
@@ -41,7 +53,6 @@ from django.conf import settings
 from .errors import NoFeasiblePlanError
 
 EPS = 1e-9
-TIE_BREAK_PER_STOP = 1e-6  # $ — only separates exactly equal-cost plans
 BILLING_DECIMALS = 3  # pumps price and meter fuel to 1/1000
 
 
@@ -81,7 +92,7 @@ class Purchase:
         """Round to pump precision: $/gal to 3 decimals, gallons to 3 decimals.
 
         Applied after optimisation so displayed gallons × displayed price
-        reproduces the stop cost exactly (see ``FuelPlan.total_cost``).
+        reproduces the stop cost exactly (see ``FuelPlan.cost_at_stops``).
         """
         return Purchase(self.node, self.mile_marker,
                         round(self.price, BILLING_DECIMALS),
@@ -103,10 +114,9 @@ class FuelPlan:
     vehicle: Vehicle
     computation_ms: float = 0.0
     arrival_gallons: list[float] = field(default_factory=list)
-    consumed_gallons: float = 0.0
-    consumed_cost: float = 0.0
-    ending_tank_gallons: float = 0.0
     starting_tank_price: float = 0.0
+    ending_tank_gallons: float = 0.0
+    ending_tank_price: float = 0.0  # weighted-average cost of the fuel left
 
     @property
     def stop_count(self) -> int:
@@ -114,14 +124,35 @@ class FuelPlan:
         return len(self.purchases)
 
     @property
-    def total_gallons(self) -> float:
+    def gallons_burned(self) -> float:
+        """Fuel used to drive the whole route."""
+        return self.total_miles / self.vehicle.mpg
+
+    @property
+    def gallons_at_stops(self) -> float:
         """Gallons bought on the trip (excludes the initial full tank)."""
         return sum(p.gallons for p in self.purchases)
 
     @property
-    def total_cost(self) -> float:
+    def cost_at_stops(self) -> float:
         """Money spent at fuel stops: the sum of the per-stop receipts."""
         return round(sum(p.billed_cost for p in self.purchases), 2)
+
+    @property
+    def starting_tank_cost(self) -> float:
+        """Cost of the full tank the vehicle leaves with."""
+        return round(self.vehicle.tank_gallons * self.starting_tank_price + EPS, 2)
+
+    @property
+    def ending_tank_value(self) -> float:
+        """Value of the fuel still in the tank at the destination."""
+        return round(self.ending_tank_gallons * self.ending_tank_price + EPS, 2)
+
+    @property
+    def trip_fuel_cost(self) -> float:
+        """Cost of all fuel burned on the trip (see module docstring)."""
+        return round(self.starting_tank_cost + self.cost_at_stops
+                     - self.ending_tank_value, 2)
 
 
 def assert_feasible(markers: np.ndarray, total_miles: float, range_miles: float) -> None:
@@ -137,9 +168,15 @@ def assert_feasible(markers: np.ndarray, total_miles: float, range_miles: float)
         )
 
 
+def _fewest_then_cheapest(stops: np.ndarray, cost: np.ndarray) -> int:
+    """Index of the (stops, cost) pair that is smallest: fewest stops, then cheapest."""
+    fewest = stops.min()
+    return int(np.argmin(np.where(stops == fewest, cost, np.inf)))
+
+
 def plan_full_tank(markers: np.ndarray, prices: np.ndarray, total_miles: float,
                    vehicle: Vehicle) -> list[Purchase]:
-    """Cheapest plan when every stop fills the tank (fewer stops breaks ties)."""
+    """Fewest fill-up stops; among plans with that many stops, the cheapest."""
     R, mpg = vehicle.usable_range_miles, vehicle.mpg
     if total_miles <= R + EPS:
         return []
@@ -148,32 +185,41 @@ def plan_full_tank(markers: np.ndarray, prices: np.ndarray, total_miles: float,
     d = np.concatenate(([0.0], markers))          # node 0 = start (full tank)
     p = np.concatenate(([0.0], prices))
     n = len(d)
-    key = np.full(n, np.inf)
-    key[0] = 0.0
-    back = np.full(n, -1, dtype=int)
+    # dp[i] = (stops[i], cost[i]): the best plan whose latest stop is station i
+    # (tank full there) — fewest stops first, then lowest cost.
+    # parent[i] = the stop before i in that plan (0 = the start).
+    stops = np.full(n, np.inf)
+    cost = np.full(n, np.inf)
+    stops[0], cost[0] = 0, 0.0
+    parent = np.full(n, -1, dtype=int)
+    # First node within one tank's range behind each node (d is sorted).
     window_lo = np.searchsorted(d, d - R - EPS, side='left')
 
     for i in range(1, n):
         lo = int(window_lo[i])
-        if lo >= i:
+        if lo >= i or not np.isfinite(stops[lo:i].min()):
             continue
+        # From j, stopping at i costs cost[j] + (d[i] - d[j]) / mpg * p[i].
+        # Written as (cost[j] - d[j] * rate) + d[i] * rate so every j in the
+        # window is compared in one vectorised NumPy call.
         rate = p[i] / mpg
-        cand = key[lo:i] - d[lo:i] * rate
-        m = int(np.argmin(cand))
-        if np.isfinite(cand[m]):
-            key[i] = cand[m] + d[i] * rate + TIE_BREAK_PER_STOP
-            back[i] = lo + m
+        m = lo + _fewest_then_cheapest(stops[lo:i], cost[lo:i] - d[lo:i] * rate)
+        stops[i] = stops[m] + 1
+        cost[i] = cost[m] + (d[i] - d[m]) * rate
+        parent[i] = m
 
+    # Answer: the best last stop that can still reach the destination.
     lo = int(np.searchsorted(d, total_miles - R - EPS, side='left'))
-    last = lo + int(np.argmin(key[lo:]))
-    if not np.isfinite(key[last]):
+    if not np.isfinite(stops[lo:].min()):
         raise NoFeasiblePlanError('Cannot find a route: no feasible fuel plan.')
+    last = lo + _fewest_then_cheapest(stops[lo:], cost[lo:])
 
+    # Walk parent[] back from the last stop to recover the stops in order.
     path: list[int] = []
     node = last
     while node > 0:
         path.append(node)
-        node = int(back[node])
+        node = int(parent[node])
     path.reverse()
 
     purchases, prev = [], 0
@@ -246,33 +292,28 @@ def plan_exact_gallon(markers: np.ndarray, prices: np.ndarray, total_miles: floa
 
 
 def simulate_tank(plan: FuelPlan, starting_tank_price: float) -> None:
-    """Fill in tank levels and the cost of fuel actually *consumed*.
+    """Fill in tank levels and the average cost of the fuel left at the end.
 
-    Uses weighted-average inventory costing: the initial full tank is valued
-    at ``starting_tank_price``; each purchase blends into the tank's average
-    cost; burned fuel is charged at the running average.
+    Weighted-average inventory costing: the initial full tank is valued at
+    ``starting_tank_price`` and each purchase blends into the tank's average.
     """
     v = plan.vehicle
-    tank, avg, pos, consumed_cost = v.tank_gallons, starting_tank_price, 0.0, 0.0
+    starting_tank_price = round(starting_tank_price, BILLING_DECIMALS)
+    tank, avg, pos = v.tank_gallons, starting_tank_price, 0.0
     arrivals: list[float] = []
     for purchase in plan.purchases:
-        used = (purchase.mile_marker - pos) / v.mpg
-        consumed_cost += used * avg
-        tank -= used
+        tank -= (purchase.mile_marker - pos) / v.mpg
         arrivals.append(tank)
         if purchase.gallons > 0:
             avg = (avg * tank + purchase.price * purchase.gallons) / (tank + purchase.gallons)
             tank += purchase.gallons
         pos = purchase.mile_marker
-    used = (plan.total_miles - pos) / v.mpg
-    consumed_cost += used * avg
-    tank -= used
+    tank -= (plan.total_miles - pos) / v.mpg
 
     plan.arrival_gallons = arrivals
-    plan.consumed_gallons = plan.total_miles / v.mpg
-    plan.consumed_cost = consumed_cost
-    plan.ending_tank_gallons = tank
     plan.starting_tank_price = starting_tank_price
+    plan.ending_tank_gallons = tank
+    plan.ending_tank_price = avg
 
 
 STRATEGIES = {

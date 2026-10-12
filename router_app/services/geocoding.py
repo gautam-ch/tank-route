@@ -10,6 +10,11 @@ Resolution order (cheapest first):
 Because most inputs are "City, ST", step 3 means a typical request makes
 **zero** geocoding network calls, leaving OSRM as the only external API call.
 
+Coordinates and Nominatim results must lie inside the US boundary (see
+``boundary.py``). Nominatim is deliberately *not* restricted to the US:
+"Toronto, ON" should resolve to Canada and be rejected, not silently match a
+"Toronto Court" in Indiana.
+
 This module also owns the place-name normalisation used by the
 ``geocode_stations`` management command, so station cities and user input are
 matched with exactly the same rules.
@@ -29,6 +34,7 @@ from django.core.cache import caches
 from geopy.exc import GeopyError
 from geopy.geocoders import Nominatim
 
+from .boundary import get_us_boundary
 from .errors import LocationNotFoundError, UpstreamServiceError
 
 logger = logging.getLogger(__name__)
@@ -157,11 +163,15 @@ def get_gazetteer() -> Gazetteer:
 
 
 def _parse_city_state(query: str) -> tuple[str, str] | None:
-    """Split 'City, ST', 'City, State', 'City ST', 'City, ST 12345, USA'."""
+    """Split 'City, ST', 'City, State', 'City ST', 'City, ST 12345, USA'.
+
+    Anything with more parts ('1600 Pennsylvania Ave NW, Washington, DC') is
+    a street address and returns None, so it is geocoded precisely.
+    """
     parts = [p.strip() for p in query.split(',') if p.strip()]
     while parts and parts[-1].lower() in _COUNTRY_SUFFIXES:
         parts.pop()
-    if len(parts) >= 2:
+    if len(parts) == 2:
         state = resolve_state_code(parts[-1])
         return (parts[-2], state) if state else None
     if len(parts) == 1:
@@ -178,7 +188,7 @@ class LocationGeocoder:
 
     def __init__(self) -> None:
         self._nominatim = Nominatim(
-            user_agent=settings.NOMINATIM_USER_AGENT,
+            user_agent=settings.HTTP_USER_AGENT,
             timeout=settings.GEOCODING_TIMEOUT_SECONDS,
         )
 
@@ -193,14 +203,27 @@ class LocationGeocoder:
             lat, lon = float(coords.group(1)), float(coords.group(2))
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 raise LocationNotFoundError(f'Invalid coordinates: "{query}".')
+            if not get_us_boundary().contains(lat, lon):
+                raise LocationNotFoundError(f'"{query}" is outside the USA.',
+                                            'Only US locations are supported.')
             return GeocodedLocation(query, lat, lon, query, 'coordinates')
 
-        cache_key = f'geocode:v1:{normalize_place(query)}'
+        cache_key = f'geocode:v2:{normalize_place(query)}'
         cached = caches['persistent'].get(cache_key)
         if cached:
             return GeocodedLocation(**{**cached, 'query': query, 'from_cache': True})
 
         location = self._from_gazetteer(query) or self._from_nominatim(query)
+        # Gazetteer entries are US places by construction (and Census internal
+        # points can sit offshore, e.g. San Francisco's includes the Farallons),
+        # so only free-text Nominatim results need the boundary check.
+        if (location.source == 'nominatim'
+                and not get_us_boundary().contains(location.lat, location.lon)):
+            raise LocationNotFoundError(
+                f'"{query}" resolved to {location.label}, which is outside the USA.',
+                'Only US locations are supported. For a US place, add the state, '
+                'e.g. "Paris, TX".',
+            )
         caches['persistent'].set(
             cache_key,
             {'query': query, 'lat': location.lat, 'lon': location.lon,
@@ -223,9 +246,9 @@ class LocationGeocoder:
 
     def _from_nominatim(self, query: str) -> GeocodedLocation:
         try:
-            result = self._nominatim.geocode(
-                query, exactly_one=True, country_codes='us'
-            )
+            # No country filter: a foreign place must resolve abroad and be
+            # rejected by the boundary check, not match a US street name.
+            result = self._nominatim.geocode(query, exactly_one=True)
         except GeopyError as exc:
             logger.warning('Nominatim failed for %r: %s', query, exc)
             raise UpstreamServiceError(
@@ -234,7 +257,7 @@ class LocationGeocoder:
             ) from exc
         if result is None:
             raise LocationNotFoundError(
-                f'Could not find location "{query}" in the USA.',
+                f'Could not find location "{query}".',
                 'Try the form "City, ST" (e.g. "Austin, TX") or "lat,lon".',
             )
         return GeocodedLocation(query, result.latitude, result.longitude,
