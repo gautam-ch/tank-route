@@ -3,18 +3,12 @@
   'use strict';
 
   const map = L.map('map', { zoomControl: true }).setView([39.5, -98.35], 4);
-  // Keyless basemaps: standard OpenStreetMap tiles (the classic Leaflet look),
-  // with Esri streets as a backup in the layer switcher.
-  const osmBase = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
-  const esriStreets = L.tileLayer(
+  // Keyless basemap: Esri World Street Map. (OpenStreetMap's own tile servers
+  // block many localhost/dev requests, and CARTO now requires an API key.)
+  L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     { maxZoom: 19, attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors' },
-  );
-  L.control.layers({ 'OpenStreetMap': osmBase, 'Esri Streets': esriStreets },
-    null, { position: 'topright' }).addTo(map);
+  ).addTo(map);
 
   const layer = L.layerGroup().addTo(map);
   const stopMarkers = [];

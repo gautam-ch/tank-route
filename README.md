@@ -52,9 +52,9 @@ To rebuild it from the CSV: `python manage.py geocode_stations` (≈3.5 min, see
   "strategy": "full_tank",
   "route": { "distance_miles": 2810.4, "driving_duration_minutes": 3019, "driving_duration_hours": 50.3 },
   "fuel_plan": {
-    "total_fuel_cost_usd": 738.11,
-    "total_gallons_purchased": 236.0,
-    "fuel_stop_count": 6,
+    "total_fuel_cost_usd": 716.16,
+    "total_gallons_purchased": 234.2,
+    "fuel_stop_count": 13,
     "stops": [
       {
         "stop_number": 1, "station_name": "SHEETZ #639", "address": "I-80 Exit 223",
@@ -63,13 +63,13 @@ To rebuild it from the CSV: `python manage.py geocode_stations` (≈3.5 min, see
         "gallons_purchased": 39.6, "cost_at_stop": 121.14
       }
     ],
-    "fuel_consumed": { "gallons": 281.04, "cost_usd": 891.65 }
+    "fuel_consumed": { "gallons": 281.04, "cost_usd": 876.17 }
   },
   "strategy_comparison": {
-    "full_tank":    { "total_fuel_cost_usd": 738.11, "fuel_stop_count": 6 },
+    "full_tank":    { "total_fuel_cost_usd": 716.16, "fuel_stop_count": 13 },
     "exact_gallon": { "total_fuel_cost_usd": 709.21, "fuel_stop_count": 15 }
   },
-  "timing": { "refueling_halting_minutes": 120, "total_trip_duration_hours": 52.3 },
+  "timing": { "refueling_halting_minutes": 260, "total_trip_duration_hours": 54.6 },
   "performance": { "algorithm_computation_ms": 1.1, "total_api_response_ms": 25.1, "external_api_calls": 0 },
   "map_url": "http://127.0.0.1:8000/api/map/?start=New+York%2C+NY&finish=Los+Angeles%2C+CA&strategy=full_tank&stop_minutes=20",
   "map_data": {
@@ -143,15 +143,16 @@ Fuel is planned in *usable* miles: a 500-mile tank with a **30-mile safety reser
 that is never planned to be burned, so each leg is at most **470 miles**.
 The vehicle starts with a full tank.
 
-**`full_tank` (default)** — every stop fills the tank, like a real truck stop.
-Minimizes the number of stops first, then cost. Exact dynamic programming over stations:
+**`full_tank` (default)** — every stop fills the tank, like a real truck stop, and the
+stops are chosen for the **lowest total cost**. Exact dynamic programming over stations:
 
 ```
-key[i] = min over j with d[i] − d[j] ≤ 470 of  key[j] + BIG + (d[i] − d[j]) / mpg × price[i]
+key[i] = min over j with d[i] − d[j] ≤ 470 of  key[j] + (d[i] − d[j]) / mpg × price[i] + TIE
 ```
 
-`BIG` is larger than any possible fuel bill, so one extra stop always outweighs any
-price saving. Each window minimum is a vectorised NumPy operation.
+`key[i]` is the cheapest way to arrive at station `i` and refill there. `TIE` is a
+negligible amount per stop (one millionth of a dollar), so among equally cheap plans the
+one with fewer stops wins. Each window minimum is a vectorised NumPy operation.
 
 **`exact_gallon`** — buy any amount at each stop; lowest possible cost. This is the
 greedy algorithm from Khuller, Malekian & Mestre, *"To Fill or Not to Fill: The Gas
@@ -161,8 +162,11 @@ Station Problem"* (ACM TALG 2011), which is optimal on a fixed path:
 - Otherwise fill up here and go to the cheapest station within range.
 - The destination counts as a free station, so no fuel is bought that would be left over.
 
-On New York → Los Angeles, `exact_gallon` saves $29 but makes 15 stops instead of 6,
-so `full_tank` is the practical default. The response includes both for comparison.
+`exact_gallon` can never cost more than `full_tank` (it is free to buy less), and is the
+proven minimum. On New York → Los Angeles: `full_tank` $716.16 with 13 stops,
+`exact_gallon` $709.21 with 15 stops. `strategy_comparison` shows both side by side.
+Neither strategy charges anything for stopping, so both will make a short stop to top up
+at a cheap station.
 
 **Correctness:** `router_app/tests.py` compares both strategies against exhaustive search
 on 400 random instances each.

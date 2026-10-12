@@ -41,8 +41,8 @@ def brute_exact(markers: list[int], prices: list[float], total: int, R: int) -> 
 
 def brute_full_tank(markers: list[int], prices: list[float], total: int,
                     R: int) -> tuple[int, float]:
-    """Exhaustive (stops, cost) minimum over all stop subsets (mpg = 1)."""
-    best = (10 ** 9, float('inf'))
+    """Exhaustive (cost, stops) minimum over all stop subsets (mpg = 1)."""
+    best = (float('inf'), 10 ** 9)
     n = len(markers)
     for k in range(n + 1):
         for subset in itertools.combinations(range(n), k):
@@ -54,7 +54,7 @@ def brute_full_tank(markers: list[int], prices: list[float], total: int,
                 cost += (markers[i] - pos) * prices[i]
                 pos = markers[i]
             if ok and total - pos <= R:
-                best = min(best, (k, round(cost, 9)))
+                best = min(best, (round(cost, 9), k))
     return best
 
 
@@ -87,10 +87,10 @@ class OptimizerBruteForceTests(SimpleTestCase):
             checked += 1
         self.assertGreater(checked, 100)
 
-    def test_full_tank_is_lexicographically_optimal(self) -> None:
+    def test_full_tank_is_cheapest_then_fewest_stops(self) -> None:
         checked = 0
         for markers, prices, total in self._instances(400, 8):
-            stops, cost = brute_full_tank(markers, prices, total, 10)
+            cost, stops = brute_full_tank(markers, prices, total, 10)
             m, p = np.array(markers, float), np.array(prices, float)
             if stops == 10 ** 9:
                 with self.assertRaises(NoFeasiblePlanError):
@@ -139,11 +139,18 @@ class OptimizerEdgeCaseTests(SimpleTestCase):
         self.assertGreaterEqual(min(fp.arrival_gallons), 3.0 - 1e-9)
         self.assertAlmostEqual(fp.ending_tank_gallons, 3.0, places=6)
 
-    def test_full_tank_prefers_fewer_stops(self) -> None:
-        # One stop at a pricey station beats two stops at cheap ones.
+    def test_full_tank_minimises_cost_not_stops(self) -> None:
+        # Options: {450} = 45 gal x $5 = $225 (1 stop); {300, 600} = $180;
+        # {300, 450} = 30 x $3 + 15 x $5 = $165 (cheapest, 2 stops).
         markers = np.array([300.0, 450.0, 600.0])
         prices = np.array([3.0, 5.0, 3.0])
         plan = plan_full_tank(markers, prices, 900, self.vehicle)
+        self.assertEqual([x.mile_marker for x in plan], [300.0, 450.0])
+
+    def test_full_tank_breaks_cost_ties_with_fewer_stops(self) -> None:
+        # Equal prices: {450} and {300, 450} both cost $135; prefer one stop.
+        plan = plan_full_tank(np.array([300.0, 450.0]), np.array([3.0, 3.0]),
+                              900, self.vehicle)
         self.assertEqual([x.mile_marker for x in plan], [450.0])
 
 

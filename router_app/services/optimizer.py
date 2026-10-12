@@ -9,14 +9,14 @@ The vehicle starts with a full tank.
 Strategies
 ----------
 full_tank
-    Every stop fills the tank completely. Objective is lexicographic:
-    **fewest stops first, then lowest cost**. Solved exactly with a DP over
-    stations (vectorised window minimum, O(K·W)).
+    Every stop fills the tank completely (realistic truck-stop behaviour),
+    and the stops are chosen for the **lowest total cost**. Exact DP over
+    stations (vectorised window minimum, O(K·W)):
 
-    key[i] = min_{j : d_i - d_j <= R} key[j] + BIG + (d_i - d_j) / mpg * p_i
+    key[i] = min_{j : d_i - d_j <= R} key[j] + (d_i - d_j) / mpg * p_i + TIE
 
-    where BIG exceeds any possible fuel bill, so one extra stop always costs
-    more than any price saving.
+    TIE is a negligible amount per stop, so among equally cheap plans the one
+    with fewer stops wins.
 
 exact_gallon
     Buy any amount at each stop. Minimum total cost, solved exactly by the
@@ -41,6 +41,7 @@ from django.conf import settings
 from .errors import NoFeasiblePlanError
 
 EPS = 1e-9
+TIE_BREAK_PER_STOP = 1e-6  # $ — only separates exactly equal-cost plans
 BILLING_DECIMALS = 3  # pumps price and meter fuel to 1/1000
 
 
@@ -138,7 +139,7 @@ def assert_feasible(markers: np.ndarray, total_miles: float, range_miles: float)
 
 def plan_full_tank(markers: np.ndarray, prices: np.ndarray, total_miles: float,
                    vehicle: Vehicle) -> list[Purchase]:
-    """Fewest stops, then cheapest, when every stop fills the tank."""
+    """Cheapest plan when every stop fills the tank (fewer stops breaks ties)."""
     R, mpg = vehicle.usable_range_miles, vehicle.mpg
     if total_miles <= R + EPS:
         return []
@@ -147,7 +148,6 @@ def plan_full_tank(markers: np.ndarray, prices: np.ndarray, total_miles: float,
     d = np.concatenate(([0.0], markers))          # node 0 = start (full tank)
     p = np.concatenate(([0.0], prices))
     n = len(d)
-    big = total_miles / mpg * float(prices.max()) * 10.0 + 1.0
     key = np.full(n, np.inf)
     key[0] = 0.0
     back = np.full(n, -1, dtype=int)
@@ -161,7 +161,7 @@ def plan_full_tank(markers: np.ndarray, prices: np.ndarray, total_miles: float,
         cand = key[lo:i] - d[lo:i] * rate
         m = int(np.argmin(cand))
         if np.isfinite(cand[m]):
-            key[i] = cand[m] + d[i] * rate + big
+            key[i] = cand[m] + d[i] * rate + TIE_BREAK_PER_STOP
             back[i] = lo + m
 
     lo = int(np.searchsorted(d, total_miles - R - EPS, side='left'))
